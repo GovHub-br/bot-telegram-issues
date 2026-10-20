@@ -1,0 +1,86 @@
+# Hayhooks com o Agent que monta os rascunhos de issue (Haystack + Ollama).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hayhooks
+  labels:
+    app.kubernetes.io/name: hayhooks
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hayhooks
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hayhooks
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hayhooks
+          image: ghcr.io/govhub-br/bot-telegram-issues-hayhooks
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 1416
+          envFrom:
+            - configMapRef:
+                name: bot-telegram-issues-config
+            - secretRef:
+                name: bot-telegram-issues-tokens
+          env:
+            - name: HOME
+              value: /tmp
+            # Não manda telemetria de uso do Haystack para fora do cluster.
+            - name: HAYSTACK_TELEMETRY_ENABLED
+              value: "False"
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# Só o bot fala com o Hayhooks (ver networkpolicy.yaml). Sem Ingress: o Hayhooks também
+# expõe rotas de deploy de pipelines, então não deve sair do cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hayhooks
+  labels:
+    app.kubernetes.io/name: hayhooks
+spec:
+  selector:
+    app.kubernetes.io/name: hayhooks
+  ports:
+    - name: http
+      port: 1416
+      targetPort: http

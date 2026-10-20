@@ -1,0 +1,17 @@
+# O Hayhooks só aceita conexões do bot. A saída (Telegram, GitHub, Ollama) fica livre.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hayhooks-only-from-bot
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hayhooks
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: bot
+      ports:
+        - port: 1416

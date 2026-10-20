@@ -1,0 +1,21 @@
+services:
+  # Endpoint Hayhooks com o Agent que monta os rascunhos de issue (Haystack + Ollama).
+  # A porta NÃO é publicada: o Hayhooks também expõe rotas de deploy de pipelines, então
+  # ele fica só na rede interna do compose. Para usar o "issue_draft" no Open WebUI,
+  # publique a porta atrás de um proxy com autenticação.
+  hayhooks:
+    build: ./hayhooks
+    image: bot-telegram-issues/hayhooks
+    env_file: .env
+    restart: unless-stopped
+
+  bot:
+    build: .
+    image: bot-telegram-issues
+    env_file: .env
+    environment:
+      HAYHOOKS_URL: http://hayhooks:1416
+    depends_on:
+      hayhooks:
+        condition: service_healthy
+    restart: unless-stopped

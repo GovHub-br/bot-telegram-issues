@@ -1,0 +1,55 @@
+# Bot do Telegram. Ele busca as mensagens no Telegram (long polling): não precisa de
+# Service nem de Ingress, só de saída para a internet (Telegram e GitHub).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bot
+  labels:
+    app.kubernetes.io/name: bot
+spec:
+  # Sempre 1 réplica e Recreate: duas instâncias com o mesmo token brigam pelo
+  # getUpdates ("Conflict: terminated by other getUpdates request").
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bot
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bot
+          image: ghcr.io/govhub-br/bot-telegram-issues
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: bot-telegram-issues-config
+            - secretRef:
+                name: bot-telegram-issues-tokens
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

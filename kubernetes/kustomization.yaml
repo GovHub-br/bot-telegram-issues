@@ -1,0 +1,26 @@
+# kubectl apply -k kubernetes/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: bot-telegram-issues
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: bot-telegram-issues
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - hayhooks.yaml
+  - bot.yaml
+  - networkpolicy.yaml
+
+# O Secret com os tokens NÃO fica no git: crie com o comando do kubernetes/README.md.
+
+# Para fixar uma versão, troque "latest" pelo SHA do commit que o GitHub Actions publicou.
+images:
+  - name: ghcr.io/govhub-br/bot-telegram-issues
+    newTag: latest
+  - name: ghcr.io/govhub-br/bot-telegram-issues-hayhooks
+    newTag: latest
