@@ -48,7 +48,10 @@ def build_application(settings: Settings) -> Application:
         .build()
     )
     app.bot_data["settings"] = settings
-    app.bot_data["gh"] = GitHubClient(settings.github_token, settings.github_org, settings.github_repos)
+    # O repositório de anexos não recebe issues: fica fora da lista do /nova.
+    app.bot_data["gh"] = GitHubClient(
+        settings.github_token, settings.github_org, settings.github_repos, exclude_repos=(settings.assets_repo,)
+    )
     if settings.hayhooks_url:
         app.bot_data["drafter"] = DrafterClient(settings.hayhooks_url)
     if settings.assets_token:

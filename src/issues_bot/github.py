@@ -128,10 +128,12 @@ class GitHubClient:
         org: str,
         only_repos: tuple[str, ...] = (),
         *,
+        exclude_repos: tuple[str, ...] = (),
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.org = org
         self.only_repos = only_repos
+        self.exclude_repos = {r.lower() for r in exclude_repos}
         self._repos: list[Repo] = []
         self._repos_at = 0.0
         self._people: dict[str, tuple[float, list[Person]]] = {}
@@ -175,7 +177,10 @@ class GitHubClient:
             self._repos = [
                 Repo(it["name"], it.get("description") or "")
                 for it in items
-                if it.get("has_issues") and not it.get("archived") and (not allowed or it["name"].lower() in allowed)
+                if it.get("has_issues")
+                and not it.get("archived")
+                and (not allowed or it["name"].lower() in allowed)
+                and it["name"].lower() not in self.exclude_repos
             ]
             self._repos_at = time.monotonic()
         return self._repos

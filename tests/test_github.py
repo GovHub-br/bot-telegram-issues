@@ -51,6 +51,11 @@ async def test_list_repos_skips_archived_and_without_issues():
     assert [r.name for r in await only_web.list_repos()] == ["web"]
 
 
+async def test_list_repos_excludes_the_assets_repo():
+    client = GitHubClient("t", "o", exclude_repos=("WEB",), transport=transport_with(lambda req: httpx.Response(404)))
+    assert [r.name for r in await client.list_repos()] == ["rag"]
+
+
 async def test_list_repos_follows_pagination():
     def handler(req: httpx.Request):
         if req.url.params.get("page") == "2":
