@@ -6,7 +6,7 @@ namespace bot-telegram-issues
 ├── Deployment hayhooks   Agent do rascunho de issues, porta 1416
 ├── Service hayhooks      ClusterIP, só dentro do cluster
 ├── NetworkPolicy         só o bot acessa o hayhooks
-├── ConfigMap             configuração sem segredos (org, Project, grupo liberado, Ollama…)
+├── ConfigMap             configuração sem segredos (org, Project, quem pode usar, Ollama…)
 └── Secret                TELEGRAM_TOKEN e GITHUB_TOKEN (criado à mão, fora do git)
 ```
 

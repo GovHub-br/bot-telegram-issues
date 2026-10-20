@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from issues_bot.config import ConfigError, Settings, parse_ids, parse_project
+from issues_bot.config import ConfigError, Settings, parse_ids, parse_project, parse_users
 from issues_bot.formatting import ago, issue_detail, parse_number, parse_ref, split_title_body, truncate
 from issues_bot.github import Comment, Issue
 
@@ -48,6 +48,19 @@ def test_settings_from_env_access_rules(monkeypatch):
     assert s.allow_everyone and s.is_allowed(999, None)
     assert s.default_labels == ("arquitetura", "bug")
     assert s.github_org == "GovHub-br" and s.github_repos == ("gov-hub", "rag")
+
+
+def test_parse_users_accepts_ids_and_usernames():
+    assert parse_users("123, @Arthrok beltrano_1") == ({123}, {"arthrok", "beltrano_1"})
+    with pytest.raises(ConfigError):
+        parse_users("@a!")
+
+
+def test_is_allowed_by_username_ignores_case():
+    s = Settings("t", "g", "o", allowed_users=frozenset(), allowed_usernames=frozenset({"arthrok"}))
+    assert s.is_allowed(99, 99, "ArthRok")
+    assert not s.is_allowed(99, 99, "outra_pessoa")
+    assert not s.is_allowed(99, 99, None)
 
 
 def test_is_allowed_by_user_or_chat():

@@ -94,10 +94,11 @@ async def _post_init(app: Application) -> None:
         log.info("Issues novas vão para o Project %s/%s (Status: %s)", *settings.project, settings.project_status or "—")
     if settings.allow_everyone:
         log.warning("ALLOWED_USERS=*: qualquer pessoa que encontrar o bot no Telegram pode usá-lo.")
-    elif settings.allowed_users or settings.allowed_chats:
+    elif settings.allowed_users or settings.allowed_usernames or settings.allowed_chats:
         log.info(
             "Liberados — usuários: %s · chats: %s",
-            ", ".join(map(str, sorted(settings.allowed_users))) or "—",
+            ", ".join([*map(str, sorted(settings.allowed_users)), *(f"@{u}" for u in sorted(settings.allowed_usernames))])
+            or "—",
             ", ".join(map(str, sorted(settings.allowed_chats))) or "—",
         )
     else:

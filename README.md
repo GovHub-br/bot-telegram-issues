@@ -103,7 +103,7 @@ cp .env.example .env
 | `GITHUB_ORG` | `GovHub-br` |
 | `GITHUB_REPOS` | vazio = todos os repositórios com issues ativadas (não arquivados); ou `gov-hub,graphrag-tais` para limitar |
 | `ALLOWED_CHATS` | `-1001234567890`: grupo(s) do time; todos os membros usam o bot lá dentro |
-| `ALLOWED_USERS` | vazio (recomendado), `*` (qualquer pessoa) ou IDs do Telegram liberados também no privado |
+| `ALLOWED_USERS` | IDs ou usernames do Telegram (`123456789`, `@fulano`), separados por vírgula; `*` libera qualquer pessoa. Hoje: `arthrok` |
 | `GITHUB_PROJECT` | `GovHub-br/4` ou a URL do Project |
 | `PROJECT_STATUS` | `Project Backlog` (coluna inicial no Project) |
 | `DEFAULT_LABELS` | `arquitetura` (labels já marcadas na criação) |
@@ -168,7 +168,7 @@ hayhooks/
 
 ### Segurança
 
-- O modo recomendado é `ALLOWED_CHATS=<id do grupo>` com `ALLOWED_USERS` vazio: o bot só funciona dentro do grupo do time, nega o privado e sai de qualquer outro grupo. Com `ALLOWED_USERS=*`, **qualquer pessoa que achar o bot** consegue ler e criar issues no repositório, que é privado.
+- Hoje o bot está liberado só para `ALLOWED_USERS=arthrok`, no privado e em qualquer grupo em que ele esteja; os demais são recusados. Para liberar um grupo inteiro, use `ALLOWED_CHATS=<id do grupo>`: assim o bot também sai sozinho de grupos não liberados. Prefira IDs a usernames quando puder, porque o username do Telegram pode ser trocado e depois reaproveitado por outra pessoa. Com `ALLOWED_USERS=*`, **qualquer pessoa que achar o bot** consegue ler e criar issues.
 - Quem não está liberado recebe o próprio ID e mais nada; em grupos, mensagens comuns de quem não está liberado são ignoradas.
 - O Hayhooks também expõe rotas de deploy de pipelines, por isso o compose **não publica a porta dele**: só o bot o acessa, pela rede interna.
 - O log do `httpx` fica em `WARNING`, porque a URL da API do Telegram contém o token do bot.

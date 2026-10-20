@@ -48,7 +48,9 @@ def settings(context: Ctx) -> Settings:
 
 def is_allowed(update: Update, context: Ctx) -> bool:
     user, chat = update.effective_user, update.effective_chat
-    return settings(context).is_allowed(user.id if user else None, chat.id if chat else None)
+    return settings(context).is_allowed(
+        user.id if user else None, chat.id if chat else None, user.username if user else None
+    )
 
 
 def denied_text(update: Update, context: Ctx) -> str:

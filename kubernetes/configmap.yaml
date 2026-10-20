@@ -13,9 +13,10 @@ data:
   DEFAULT_LABELS: arquitetura
   # Templates de issue usados quando o repositório escolhido não tem os seus.
   ISSUE_TEMPLATES_REPO: data-application-cidades
-  # Só o grupo do time usa o bot; o privado fica fechado.
-  ALLOWED_CHATS: "-1002044620274"
-  ALLOWED_USERS: ""
+  # Quem usa o bot: IDs ou usernames do Telegram. Para liberar um grupo inteiro,
+  # coloque o ID dele em ALLOWED_CHATS (o /start no grupo mostra o ID).
+  ALLOWED_USERS: arthrok
+  ALLOWED_CHATS: ""
   HAYHOOKS_URL: http://hayhooks:1416
   # Service do cluster que aponta para o Mac Studio (10.0.0.10).
   OLLAMA_URL: http://ollama-external.macstudio.svc.cluster.local:11434
