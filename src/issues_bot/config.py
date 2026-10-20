@@ -29,6 +29,9 @@ class Settings:
     hayhooks_url: str | None = None
     project: tuple[str, int] | None = None  # (organização, número) do GitHub Project
     project_status: str | None = None
+    # Anexo de imagens: repositório só de anexos e um token com Contents: write só nele.
+    assets_repo: str = "issue-assets"
+    assets_token: str | None = None
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -60,6 +63,8 @@ class Settings:
             hayhooks_url=_url(os.getenv("HAYHOOKS_URL", "")),
             project=parse_project(os.getenv("GITHUB_PROJECT", "")),
             project_status=os.getenv("PROJECT_STATUS", "").strip() or None,
+            assets_repo=os.getenv("ASSETS_REPO", "").strip() or "issue-assets",
+            assets_token=os.getenv("GITHUB_TOKEN_ASSETS", "").strip() or None,
         )
 
     def is_allowed(self, user_id: int | None, chat_id: int | None, username: str | None = None) -> bool:

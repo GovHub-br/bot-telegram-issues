@@ -13,6 +13,8 @@ O Agent **nunca cria** a issue: quem cria é o bot, depois que a pessoa confirma
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import re
 from importlib.resources import files
@@ -21,7 +23,7 @@ from typing import Any
 import httpx
 from haystack.components.agents import Agent
 from haystack.components.generators.chat.types.protocol import ChatGenerator
-from haystack.dataclasses import ChatMessage
+from haystack.dataclasses import ChatMessage, ImageContent
 from haystack.tools import Tool
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator
 from jinja2 import Template
@@ -36,6 +38,9 @@ MAX_TITLE = 120
 MAX_LABELS = 3
 # Labels comuns, usadas quando o rascunho não é para um repositório específico (Open WebUI).
 FALLBACK_LABELS = ["bug", "enhancement", "documentation", "question"]
+MAX_IMAGES = 4
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_MAGIC = {b"\xff\xd8\xff": "image/jpeg", b"\x89PNG": "image/png", b"RIFF": "image/webp", b"GIF8": "image/gif"}
 _REF_RE = re.compile(r"(?:(?P<repo>[\w.-]+)?#)?(?P<n>\d+)")
 
 
@@ -213,9 +218,10 @@ class IssueDrafter:
             log.warning("Não consegui ler os templates de issue: %s", exc)
         return []
 
-    def draft(self, texto: str, repo: str | None = None) -> dict[str, Any]:
+    def draft(self, texto: str, repo: str | None = None, imagens: list[str] | None = None) -> dict[str, Any]:
         texto = texto.strip()
-        if not texto:
+        images = self._images(imagens or [])
+        if not texto and not images:
             raise DraftError("O relato está vazio.")
 
         labels = self.allowed_labels(repo)
@@ -223,7 +229,7 @@ class IssueDrafter:
         people = self.assignable_people(repo)
         system_prompt = self._prompt.render(
             org=self.settings.github_org, repo=repo, labels=labels, default_labels=self.settings.default_labels,
-            templates=templates, people=bool(people),
+            templates=templates, people=bool(people), images=bool(images),
         )
         tools = [self._search_tool()]
         if people:
@@ -244,7 +250,8 @@ class IssueDrafter:
             },
         )
         agent.warm_up()
-        result = agent.run(messages=[ChatMessage.from_user(texto)])
+        relato = texto or "(Relato só com imagem: escreva a issue a partir do print.)"
+        result = agent.run(messages=[ChatMessage.from_user(content_parts=[relato, *images])])
 
         rascunho = result.get("rascunho")
         if not rascunho:
@@ -253,6 +260,25 @@ class IssueDrafter:
             raise DraftError("O modelo não chegou a propor a issue.")
         draft = self._clean(rascunho, result.get("similares") or [], labels, templates)
         return draft | self._assignee(rascunho.get("responsavel"), result.get("candidatos_responsavel") or [])
+
+    @staticmethod
+    def _images(encoded: list[str]) -> list[ImageContent]:
+        """Imagens em base64 (prints enviados pelo Telegram) → conteúdo para o modelo com visão."""
+        if len(encoded) > MAX_IMAGES:
+            raise DraftError(f"Mande no máximo {MAX_IMAGES} imagens.")
+        images = []
+        for item in encoded:
+            try:
+                raw = base64.b64decode(item, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise DraftError("Uma das imagens não veio em base64 válido.") from exc
+            if len(raw) > MAX_IMAGE_BYTES:
+                raise DraftError("Imagem grande demais (máximo 8 MB).")
+            mime = next((m for magic, m in _MAGIC.items() if raw.startswith(magic)), None)
+            if not mime:
+                raise DraftError("Formato de imagem não suportado (use JPEG, PNG, WEBP ou GIF).")
+            images.append(ImageContent(base64_image=item, mime_type=mime))
+        return images
 
     def assignable_people(self, repo: str | None) -> list[Person]:
         if not repo:

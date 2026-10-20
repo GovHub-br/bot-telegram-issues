@@ -7,7 +7,7 @@ namespace bot-telegram-issues
 ├── Service hayhooks      ClusterIP, só dentro do cluster
 ├── NetworkPolicy         só o bot acessa o hayhooks
 ├── ConfigMap             configuração sem segredos (org, Project, quem pode usar, Ollama…)
-└── Secret                TELEGRAM_TOKEN e GITHUB_TOKEN (criado à mão, fora do git)
+└── Secret                TELEGRAM_TOKEN, GITHUB_TOKEN e GITHUB_TOKEN_ASSETS (criado à mão, fora do git)
 ```
 
 **Rede:** nada entra no cluster. O bot só **sai** para o Telegram e o GitHub (internet). O Hayhooks sai para o GitHub e para o Ollama pelo Service `ollama-external.macstudio`, que já aponta para o Mac Studio (`10.0.0.10:11434`). As pessoas usam o bot de qualquer lugar, porque falam com os servidores do Telegram, e não com o cluster.
@@ -35,7 +35,7 @@ Como o repositório é privado, os pacotes nascem **privados**. Escolha uma das 
    ```
 
    ```bash
-   grep -E '^(TELEGRAM_TOKEN|GITHUB_TOKEN)=' .env | kubectl -n bot-telegram-issues create secret generic bot-telegram-issues-tokens --from-env-file=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
+   grep -E '^(TELEGRAM_TOKEN|GITHUB_TOKEN|GITHUB_TOKEN_ASSETS)=' .env | kubectl -n bot-telegram-issues create secret generic bot-telegram-issues-tokens --from-env-file=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
    ```
 
 3. Aplique o resto:

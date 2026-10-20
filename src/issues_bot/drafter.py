@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import base64
+
 import httpx
 
 from .people import Person
@@ -63,9 +65,10 @@ class DrafterClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def draft(self, text: str, repo: str) -> Draft:
+    async def draft(self, text: str, repo: str, images: list[bytes] | None = None) -> Draft:
+        payload = {"texto": text, "repo": repo, "imagens": [base64.b64encode(i).decode() for i in images or []]}
         try:
-            resp = await self._http.post("/issue_draft/run", json={"texto": text, "repo": repo})
+            resp = await self._http.post("/issue_draft/run", json=payload)
             resp.raise_for_status()
             result = resp.json()["result"]
         except httpx.TimeoutException as exc:

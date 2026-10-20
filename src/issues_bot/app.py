@@ -19,6 +19,7 @@ from telegram.ext import (
 from . import handlers as h
 from . import new_issue
 from .config import Settings
+from .assets import AssetStore
 from .drafter import DrafterClient
 from .github import GitHubClient, GitHubError
 
@@ -50,6 +51,8 @@ def build_application(settings: Settings) -> Application:
     app.bot_data["gh"] = GitHubClient(settings.github_token, settings.github_org, settings.github_repos)
     if settings.hayhooks_url:
         app.bot_data["drafter"] = DrafterClient(settings.hayhooks_url)
+    if settings.assets_token:
+        app.bot_data["assets"] = AssetStore(settings.assets_token, settings.github_org, settings.assets_repo)
 
     app.add_handlers(
         [
@@ -90,6 +93,10 @@ async def _post_init(app: Application) -> None:
         log.info("Rascunho assistido ligado: %s/issue_draft", settings.hayhooks_url)
     else:
         log.info("Rascunho assistido desligado (HAYHOOKS_URL vazio): /nova no modo manual")
+    if settings.assets_token:
+        log.info("Imagens das issues vão para %s/%s", settings.github_org, settings.assets_repo)
+    else:
+        log.info("Anexo de imagens desligado (GITHUB_TOKEN_ASSETS vazio): imagens só ajudam no rascunho")
     if settings.project:
         log.info("Issues novas vão para o Project %s/%s (Status: %s)", *settings.project, settings.project_status or "—")
     if settings.allow_everyone:
@@ -107,5 +114,6 @@ async def _post_init(app: Application) -> None:
 
 async def _post_shutdown(app: Application) -> None:
     await app.bot_data["gh"].aclose()
-    if drafter := app.bot_data.get("drafter"):
-        await drafter.aclose()
+    for client in ("drafter", "assets"):
+        if found := app.bot_data.get(client):
+            await found.aclose()

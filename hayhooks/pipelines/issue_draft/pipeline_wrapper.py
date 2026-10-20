@@ -1,6 +1,6 @@
 """Endpoint Hayhooks `issue_draft`: relato livre → rascunho de issue.
 
-- `POST /issue_draft/run`  {"texto": "...", "repo": "graphrag-tais"}
+- `POST /issue_draft/run`  {"texto": "...", "repo": "graphrag-tais", "imagens": ["<base64>", ...]}
       → {"result": {title, body, labels, duplicada_de: {repo, number} | null, similares, modelo}}
 - `issue_draft` como modelo OpenAI-compat (Open WebUI): responde o rascunho em Markdown.
 
@@ -21,12 +21,12 @@ class PipelineWrapper(BasePipelineWrapper):
         log.info("issue_draft pronto: modelo {} em {}, organização {}", settings.ollama_model, settings.ollama_url,
                  settings.github_org)
 
-    def run_api(self, texto: str, repo: str | None = None) -> dict:
-        """Transforma um relato livre em rascunho de issue (título, corpo, labels e issues parecidas).
+    def run_api(self, texto: str = "", repo: str | None = None, imagens: list[str] | None = None) -> dict:
+        """Transforma um relato livre (texto e/ou imagens em base64) em rascunho de issue.
         `repo` define de onde vêm as labels; a busca de duplicadas cobre a organização toda."""
-        log.info("issue_draft [{}]: '{}...'", repo or "-", texto[:80])
+        log.info("issue_draft [{}] {} imagem(ns): '{}...'", repo or "-", len(imagens or []), texto[:80])
         try:
-            return self.drafter.draft(texto, repo)
+            return self.drafter.draft(texto, repo, imagens)
         except DraftError as exc:
             return {"erro": str(exc)}
 

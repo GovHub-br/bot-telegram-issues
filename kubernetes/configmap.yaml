@@ -13,6 +13,8 @@ data:
   DEFAULT_LABELS: arquitetura
   # Templates de issue usados quando o repositório escolhido não tem os seus.
   ISSUE_TEMPLATES_REPO: data-application-cidades
+  # Repositório (privado) onde ficam as imagens anexadas às issues.
+  ASSETS_REPO: issue-assets
   # Quem usa o bot: IDs ou usernames do Telegram. Para liberar um grupo inteiro,
   # coloque o ID dele em ALLOWED_CHATS (o /start no grupo mostra o ID).
   ALLOWED_USERS: arthrok

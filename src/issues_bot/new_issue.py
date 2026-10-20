@@ -21,6 +21,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandl
 from telegram.warnings import PTBUserWarning
 
 from . import keyboards
+from .assets import AssetStore, image_extension
 from .drafter import DrafterClient, DraftUnavailable
 from .formatting import split_title_body, telegram_signature, truncate
 from .github import GitHubError, Issue
@@ -33,6 +34,7 @@ REPO, DESCRIBE, TITLE, BODY, LABELS, CONFIRM, WHO = range(7)
 MAX_TITLE = 256
 MAX_LABEL_OPTIONS = 24
 PREVIEW_BODY = 2500
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
 TELEGRAM_LIMIT = 4096
 
 
@@ -78,7 +80,7 @@ async def start(update: Update, context: Ctx) -> int:
     draft = context.user_data["draft"] = {
         "repo": "", "text": "", "title": "", "body": "", "labels": [], "options": [], "suggested": [],
         "similar": [], "duplicate_of": None, "model": "", "template": None, "editing": False, "prefilled": False,
-        "assignee": None, "assignee_options": [],
+        "assignee": None, "assignee_options": [], "images": [], "media_group": None,
     }
 
     if "|" in payload:
@@ -154,7 +156,8 @@ async def after_repo(update: Update, context: Ctx) -> int:
         await ask(
             update,
             "📝 <b>Nova issue</b>\n\nMe conta o que precisa virar issue, do seu jeito: o problema ou a ideia, "
-            "onde acontece, o que você esperava. Eu monto o rascunho e procuro issues parecidas.\n\n"
+            "onde acontece, o que você esperava. Pode mandar um <b>print</b> (foto com ou sem legenda). "
+            "Eu monto o rascunho e procuro issues parecidas.\n\n"
             "<i>/manual para preencher você mesmo · /cancelar para desistir</i>",
             "Descreva o problema ou a ideia",
         )
@@ -168,18 +171,48 @@ async def describe(update: Update, context: Ctx) -> int:
     return await assisted(update, context, update.effective_message.text)
 
 
+async def read_image(update: Update, context: Ctx) -> bytes | None:
+    """Baixa a foto (ou imagem enviada como arquivo) da mensagem. Avisa e devolve None se não der."""
+    msg = update.effective_message
+    file = msg.photo[-1] if msg.photo else msg.document  # a última foto é a de maior resolução
+    if file.file_size and file.file_size > MAX_IMAGE_BYTES:
+        await msg.reply_text("Essa imagem passa de 8 MB. Mande uma menor ou um print.")
+        return None
+    data = bytes(await (await file.get_file()).download_as_bytearray())
+    if not image_extension(data):
+        await msg.reply_text("Não reconheci essa imagem. Mande em JPEG, PNG, WEBP ou GIF.")
+        return None
+    return data
+
+
+async def describe_photo(update: Update, context: Ctx) -> int:
+    draft = draft_of(context)
+    msg = update.effective_message
+    # Álbum: cada foto chega como uma mensagem; usamos só a primeira.
+    if msg.media_group_id and msg.media_group_id == draft["media_group"]:
+        return DESCRIBE
+    draft["media_group"] = msg.media_group_id
+    if (data := await read_image(update, context)) is None:
+        return DESCRIBE
+    draft["images"] = [data]
+    if msg.media_group_id:
+        await msg.reply_text("🖼️ Recebi um álbum: vou usar só a primeira imagem.")
+    return await assisted(update, context, msg.caption or "")
+
+
 async def manual(update: Update, context: Ctx) -> int:
     return await ask_title(update)
 
 
 async def assisted(update: Update, context: Ctx, text: str) -> int:
     draft = draft_of(context)
+    wait = "até 1 minuto, por causa da imagem" if draft["images"] else "leva uns 20 segundos"
     status = await update.effective_message.reply_text(
-        "🤖 Montando o rascunho e procurando issues parecidas… <i>leva uns 20 segundos</i>"
+        f"🤖 Montando o rascunho e procurando issues parecidas… <i>{wait}</i>"
     )
     await typing(update, context)
     try:
-        result = await drafter(context).draft(text, draft["repo"])
+        result = await drafter(context).draft(text, draft["repo"], draft["images"])
     except DraftUnavailable as exc:
         log.warning("Rascunho assistido indisponível: %s", exc)
         draft["body"] = text
@@ -215,6 +248,16 @@ async def got_title(update: Update, context: Ctx) -> int:
     if draft["body"]:  # veio do fallback do assistente: a descrição já está preenchida
         return await ask_labels(update, context)
     return await ask_body(update)
+
+
+async def got_body_photo(update: Update, context: Ctx) -> int:
+    """No modo manual, a descrição pode vir como foto com legenda."""
+    if (data := await read_image(update, context)) is None:
+        return BODY
+    draft = draft_of(context)
+    draft["images"] = [data]
+    draft["body"] = update.effective_message.caption or draft["body"]
+    return await after_body(update, context)
 
 
 async def got_body(update: Update, context: Ctx) -> int:
@@ -315,6 +358,9 @@ def _preview(draft: dict[str, Any], context: Ctx, body_limit: int) -> str:
         lines.append("<b>Labels:</b> " + " ".join(f"<code>{escape(lb)}</code>" for lb in draft["labels"]))
     if draft["assignee"]:
         lines.append(f"<b>Responsável:</b> 👤 {escape(draft['assignee'].label)}")
+    if draft["images"]:
+        where = "vai anexada na issue" if context.bot_data.get("assets") else "só ajudou no rascunho (anexo desligado)"
+        lines.append(f"<b>Imagem:</b> 🖼️ {where}")
     body = draft["body"].strip()
     lines += ["", f"<blockquote expandable>{escape(truncate(body, body_limit))}</blockquote>" if body else "<i>Sem descrição.</i>"]
     others = [s for s in draft["similar"] if (s.repo, s.number) != draft["duplicate_of"]]
@@ -436,7 +482,8 @@ async def create(update: Update, context: Ctx, message: Message) -> None:
     await typing(update, context)
     user = update.effective_user
     note = f"rascunho gerado com {draft['model']}" if draft["model"] else None
-    body = (draft["body"].strip() + telegram_signature(user.full_name, user.username, note)).lstrip()
+    images_md, images_warning = await upload_images(context, draft)
+    body = (draft["body"].strip() + images_md + telegram_signature(user.full_name, user.username, note)).lstrip()
     assignees = [draft["assignee"].login] if draft["assignee"] else None
     issue = await gh(context).create_issue(draft["repo"], draft["title"], body, draft["labels"], assignees)
     log.info("Issue %s criada por %s", issue.ref, user.id)
@@ -446,7 +493,21 @@ async def create(update: Update, context: Ctx, message: Message) -> None:
     if issue.assignees:
         text += "\n👤 " + ", ".join(f"@{escape(a)}" for a in issue.assignees)
     project_line, project_url = await put_in_project(context, issue)
-    await edit(message, text + project_line, keyboards.open_issue(issue, project_url))
+    await edit(message, text + images_warning + project_line, keyboards.open_issue(issue, project_url))
+
+
+async def upload_images(context: Ctx, draft: dict[str, Any]) -> tuple[str, str]:
+    """Sobe as imagens para o repositório de anexos. Devolve o Markdown para a issue e, se
+    algo falhar, um aviso para a mensagem (a issue é criada mesmo assim)."""
+    store: AssetStore | None = context.bot_data.get("assets")
+    if not draft["images"] or not store:
+        return "", ""
+    try:
+        urls = [await store.upload_image(img, draft["repo"]) for img in draft["images"]]
+    except GitHubError as exc:
+        log.warning("Não consegui anexar a imagem: %s", exc.message)
+        return "", f"\n⚠️ <i>A imagem não foi anexada: {escape(exc.message)}</i>"
+    return "\n\n## Imagens\n\n" + "\n\n".join(f"![Imagem enviada pelo Telegram]({u})" for u in urls), ""
 
 
 async def put_in_project(context: Ctx, issue: Issue) -> tuple[str, str | None]:
@@ -472,6 +533,7 @@ async def unexpected(update: Update, context: Ctx) -> None:
 
 def conversation() -> ConversationHandler:
     text = filters.TEXT & ~filters.COMMAND
+    image = filters.PHOTO | filters.Document.IMAGE
     # Misturar CallbackQueryHandler com per_message=False gera um aviso informativo do PTB;
     # é exatamente o comportamento que queremos (uma conversa por pessoa em cada chat).
     with warnings.catch_warnings():
@@ -484,9 +546,17 @@ def conversation() -> ConversationHandler:
                     CallbackQueryHandler(repo_page, pattern=r"^n:rp:\d+$"),
                     MessageHandler(text, unexpected),
                 ],
-                DESCRIBE: [MessageHandler(text, describe), CommandHandler("manual", manual)],
+                DESCRIBE: [
+                    MessageHandler(text, describe),
+                    MessageHandler(image, describe_photo),
+                    CommandHandler("manual", manual),
+                ],
                 TITLE: [MessageHandler(text, got_title)],
-                BODY: [MessageHandler(text, got_body), CommandHandler("pular", skip_body)],
+                BODY: [
+                    MessageHandler(text, got_body),
+                    MessageHandler(image, got_body_photo),
+                    CommandHandler("pular", skip_body),
+                ],
                 LABELS: [
                     CallbackQueryHandler(toggle_label, pattern=r"^n:l:\d+$"),
                     CallbackQueryHandler(labels_done, pattern=r"^n:ok$"),

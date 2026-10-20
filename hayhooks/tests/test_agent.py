@@ -307,3 +307,33 @@ def test_without_people_there_is_no_person_tool():
     drafter, gen, _ = make([call("propor_issue", title="T", body="B", labels=["bug"])])
     drafter.draft("relato", "rag")
     assert "buscar_pessoa" not in gen.seen[0][0].text
+
+
+PNG_1PX = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC"
+)
+
+
+def test_image_goes_to_the_model_with_the_report():
+    drafter, gen, _ = make([call("propor_issue", title="T", body="B", labels=["bug"])])
+    drafter.draft("olha esse erro", "rag", [PNG_1PX])
+    first = gen.seen[0][1]  # [system, user]
+    assert first.text == "olha esse erro"
+    assert [i.mime_type for i in first.images] == ["image/png"]
+    assert "veio com **imagem**" in gen.seen[0][0].text
+
+
+def test_image_only_report_is_accepted():
+    drafter, gen, _ = make([call("propor_issue", title="T", body="B", labels=["bug"])])
+    drafter.draft("", "rag", [PNG_1PX])
+    assert "só com imagem" in gen.seen[0][1].text
+
+
+@pytest.mark.parametrize(
+    "images, error",
+    [(["não é base64!"], "base64"), (["aGVsbG8="], "Formato"), ([PNG_1PX] * 5, "no máximo")],
+)
+def test_invalid_images_are_refused(images, error):
+    drafter, _, _ = make([])
+    with pytest.raises(DraftError, match=error):
+        drafter.draft("relato", "rag", images)

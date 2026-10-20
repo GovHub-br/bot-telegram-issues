@@ -1,5 +1,6 @@
 """Conversa do /nova de ponta a ponta: PTB de verdade, com Telegram, GitHub e Hayhooks falsos."""
 
+import base64
 import itertools
 import json
 from typing import Any
@@ -10,10 +11,14 @@ from telegram import Update
 from telegram.request import BaseRequest, RequestData
 
 from issues_bot.app import build_application
+from issues_bot.assets import AssetStore
 from issues_bot.config import Settings
 from issues_bot.drafter import DrafterClient
 from issues_bot.github import GitHubClient
 
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC"
+)
 BOT = {"id": 999, "is_bot": True, "first_name": "Bot", "username": "bot"}
 USER = {"id": 10, "is_bot": False, "first_name": "Ana", "username": "ana"}
 CHAT = {"id": 10, "type": "private"}
@@ -40,6 +45,12 @@ class FakeTelegram(BaseRequest):
         endpoint = url.rsplit("/", 1)[-1]
         params = request_data.parameters if request_data else {}
         self.sent.append((endpoint, params))
+        if "/file/bot" in url:  # download do arquivo da foto
+            return 200, PNG
+        if endpoint == "getFile":
+            result: Any = {"file_id": params["file_id"], "file_unique_id": "u", "file_size": len(PNG),
+                           "file_path": "photos/print.png"}
+            return 200, json.dumps({"ok": True, "result": result}).encode()
         if endpoint == "getMe":
             result: Any = BOT | {"can_join_groups": True, "can_read_all_group_messages": False,
                                  "supports_inline_queries": False}
@@ -128,10 +139,28 @@ DRAFT = {
 }
 
 
+HAYHOOKS_CALLS: list[dict[str, Any]] = []
+
+
 def hayhooks_ok(req: httpx.Request) -> httpx.Response:
     assert req.url.path == "/issue_draft/run"
-    assert json.loads(req.content) == {"texto": "o retriever erra a coluna", "repo": "rag"}
+    body = json.loads(req.content)
+    HAYHOOKS_CALLS.append(body)
+    assert body["repo"] == "rag"
+    assert body["texto"] == "o retriever erra a coluna" or body["imagens"]
     return httpx.Response(200, json={"result": DRAFT})
+
+
+class FakeAssets:
+    def __init__(self):
+        self.saved: list[tuple[str, bytes]] = []
+
+    def __call__(self, req: httpx.Request) -> httpx.Response:
+        if req.method == "GET":
+            return httpx.Response(200, json={"default_branch": "main"})
+        path = req.url.path.split("/contents/", 1)[1]
+        self.saved.append((path, base64.b64decode(json.loads(req.content)["content"])))
+        return httpx.Response(201, json={"content": {"path": path}})
 
 
 def hayhooks_down(req: httpx.Request) -> httpx.Response:
@@ -139,8 +168,9 @@ def hayhooks_down(req: httpx.Request) -> httpx.Response:
 
 
 class Harness:
-    def __init__(self, hayhooks=None, *, project_forbidden=False):
+    def __init__(self, hayhooks=None, *, project_forbidden=False, assets=False):
         self.tg = FakeTelegram()
+        self.assets = FakeAssets()
         self.github = FakeGitHub(project_forbidden)
         settings = Settings("1:x", "g", "o", allowed_users=frozenset(), allow_everyone=True,
                             default_labels=("arquitetura",), project=("GovHub-br", 4),
@@ -148,6 +178,10 @@ class Harness:
         self.app = build_application(settings)
         self.app.bot._request = (self.tg, self.tg)  # type: ignore[attr-defined]
         self.app.bot_data["gh"] = GitHubClient("g", "o", transport=httpx.MockTransport(self.github))
+        if assets:
+            self.app.bot_data["assets"] = AssetStore("t", "o", "issue-assets", transport=httpx.MockTransport(self.assets))
+        else:
+            self.app.bot_data.pop("assets", None)
         if hayhooks:
             self.app.bot_data["drafter"] = DrafterClient("http://hh", transport=httpx.MockTransport(hayhooks))
         else:
@@ -172,6 +206,16 @@ class Harness:
         msg = {"message_id": next(self._ids), "date": 0, "chat": CHAT, "from": USER, "text": text}
         if text.startswith("/"):
             msg["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
+        await self.app.process_update(Update.de_json({"update_id": next(self._ids), "message": msg}, self.app.bot))
+
+    async def send_photo(self, caption: str = "", media_group: str | None = None):
+        msg = {"message_id": next(self._ids), "date": 0, "chat": CHAT, "from": USER,
+               "photo": [{"file_id": "small", "file_unique_id": "s", "width": 90, "height": 90},
+                         {"file_id": "big", "file_unique_id": "b", "width": 1280, "height": 720}]}
+        if caption:
+            msg["caption"] = caption
+        if media_group:
+            msg["media_group_id"] = media_group
         await self.app.process_update(Update.de_json({"update_id": next(self._ids), "message": msg}, self.app.bot))
 
     async def click(self, data: str):
@@ -395,3 +439,57 @@ async def test_changing_repo_drops_assignee_who_cannot_be_assigned_there():
         assert "Responsável" not in h.tg.texts()[-1]
         await h.click("n:create")
     assert h.github.created[0]["repo"] == "web" and "assignees" not in h.github.created[0]
+
+
+async def test_photo_goes_to_the_assistant_and_is_attached_to_the_issue():
+    HAYHOOKS_CALLS.clear()
+    async with Harness(hayhooks_ok, assets=True) as h:
+        await h.send("/nova")
+        await h.click("n:r:rag")
+        await h.send_photo(caption="olha esse erro")
+        file_ids = [p["file_id"] for e, p in h.tg.sent if e == "getFile"]
+        assert file_ids == ["big"]  # a maior resolução
+        assert base64.b64decode(HAYHOOKS_CALLS[-1]["imagens"][0]) == PNG
+        assert HAYHOOKS_CALLS[-1]["texto"] == "olha esse erro"
+        await h.click("n:ok")
+        assert "🖼️ vai anexada na issue" in h.tg.texts()[-1]
+        await h.click("n:create")
+
+    path, data = h.assets.saved[0]
+    assert path.startswith("rag/") and path.endswith(".png") and data == PNG
+    body = h.github.created[0]["body"]
+    assert f"![Imagem enviada pelo Telegram](https://github.com/o/issue-assets/raw/main/{path})" in body
+    assert body.index("## Imagens") < body.index("Enviado via Telegram")
+
+
+async def test_album_uses_only_the_first_photo():
+    HAYHOOKS_CALLS.clear()
+    async with Harness(hayhooks_ok, assets=True) as h:
+        await h.send("/nova")
+        await h.click("n:r:rag")
+        await h.send_photo(media_group="album1")
+        assert "só a primeira imagem" in " ".join(h.tg.texts())
+    assert len(HAYHOOKS_CALLS) == 1
+
+
+async def test_photo_without_asset_store_only_helps_the_draft():
+    async with Harness(hayhooks_ok) as h:
+        await h.send("/nova")
+        await h.click("n:r:rag")
+        await h.send_photo()
+        await h.click("n:ok")
+        assert "só ajudou no rascunho" in h.tg.texts()[-1]
+        await h.click("n:create")
+    assert "## Imagens" not in h.github.created[0]["body"]
+
+
+async def test_manual_flow_accepts_photo_as_description():
+    async with Harness(assets=True) as h:
+        await h.send("/nova")
+        await h.click("n:r:rag")
+        await h.send("Título manual")
+        await h.send_photo(caption="descrição na legenda")
+        await h.click("n:ok")
+        await h.click("n:create")
+    body = h.github.created[0]["body"]
+    assert body.startswith("descrição na legenda") and "## Imagens" in body
