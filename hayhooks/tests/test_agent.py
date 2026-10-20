@@ -6,6 +6,7 @@ from haystack.dataclasses import ChatMessage, ToolCall
 
 from issue_drafter.agent import DraftError, IssueDrafter, to_markdown
 from issue_drafter.config import DrafterSettings, _url
+from issue_drafter.github import IssueTemplate, parse_template
 
 SETTINGS = DrafterSettings(
     github_token="t", github_org="org", ollama_url="http://x", ollama_model="m", default_labels=("arquitetura",)
@@ -27,9 +28,15 @@ class ScriptedChatGenerator:
 
 
 class FakeGitHub:
-    def __init__(self, found=None):
+    def __init__(self, found=None, templates=None):
         self.found = found or []
         self.queries: list[str] = []
+        self.templates_by_repo = templates or {}
+        self.templates_asked: list[str] = []
+
+    def templates(self, repo):
+        self.templates_asked.append(repo)
+        return self.templates_by_repo.get(repo, [])
 
     def labels(self, repo):
         self.labels_repo = repo
@@ -52,10 +59,14 @@ FOUND = [
 ]
 
 
-def make(replies, found=FOUND):
+def make(replies, found=FOUND, templates=None, settings=SETTINGS):
     gen = ScriptedChatGenerator(replies)
-    gh = FakeGitHub(found)
-    return IssueDrafter(SETTINGS, chat_generator=gen, github=gh), gen, gh
+    gh = FakeGitHub(found, templates)
+    return IssueDrafter(settings, chat_generator=gen, github=gh), gen, gh
+
+
+DAG = IssueTemplate("DAG de Dados", "Criar ou corrigir uma DAG", "## Contexto\n\nDescreva.\n\n## Tarefas\n\n- [ ] Testar", ["bug"])
+GERAL = IssueTemplate("Demanda Geral de Dados", "Demanda ainda não classificada", "## Contexto\n\nDescreva.")
 
 
 def test_search_then_propose():
@@ -158,3 +169,78 @@ def test_to_markdown():
 )
 def test_url_gets_scheme(raw, expected):
     assert _url(raw) == expected
+
+
+def test_uses_the_repo_template():
+    drafter, gen, gh = make(
+        [
+            call("buscar_issues", termos="dag contratos"),
+            call("ler_template", nome="DAG de Dados"),
+            call("propor_issue", title="Corrigir DAG", body="## Contexto\n\nA DAG falha.", labels=["enhancement"],
+                 template="DAG de Dados"),
+        ],
+        templates={"rag": [DAG, GERAL]},
+    )
+    draft = drafter.draft("a dag de contratos falha", "rag")
+
+    system = gen.seen[0][0].text
+    assert "**DAG de Dados**: Criar ou corrigir uma DAG" in system and "ler_template" in system
+    assert gen.seen[2][-1].tool_call_result.result.startswith("## Contexto")  # o modelo chega ao LLM
+    assert draft["template"] == "DAG de Dados"
+    assert draft["labels"] == ["enhancement", "bug"]  # a label do template entra junto
+
+
+def test_falls_back_to_the_org_templates_repo():
+    from dataclasses import replace
+
+    drafter, gen, gh = make(
+        [call("propor_issue", title="T", body="B", labels=["bug"], template="Demanda Geral de Dados")],
+        templates={"cidades": [GERAL]},
+        settings=replace(SETTINGS, templates_repo="cidades"),
+    )
+    draft = drafter.draft("relato", "rag")
+    assert gh.templates_asked == ["rag", "cidades"]
+    assert draft["template"] == "Demanda Geral de Dados"
+
+
+def test_without_templates_keeps_the_default_sections():
+    drafter, gen, _ = make([call("propor_issue", title="T", body="B", labels=["bug"], template="inventado")])
+    draft = drafter.draft("relato", "rag")
+    assert draft["template"] is None
+    assert "## Critérios de aceite" in gen.seen[0][0].text and "ler_template" not in gen.seen[0][0].text
+
+
+def test_parse_template_front_matter():
+    tpl = parse_template(
+        "---\nname: Modelo dbt\nabout: Criar modelo dbt\ntitle: ''\nlabels: 'dbt, dados'\nassignees: ''\n\n---\n\n## Contexto\n",
+        "modelo-dbt.md",
+    )
+    assert (tpl.name, tpl.about, tpl.labels, tpl.body) == ("Modelo dbt", "Criar modelo dbt", ["dbt", "dados"], "## Contexto")
+    assert parse_template("## Só corpo", "sem-front-matter.md").name == "sem-front-matter"
+
+
+def test_github_reader_retries_dropped_connections_and_reads_templates():
+    import base64
+
+    import httpx
+
+    from issue_drafter.github import GitHubReader
+
+    calls = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        if req.url.path.endswith("/ISSUE_TEMPLATE"):
+            return httpx.Response(200, json=[
+                {"type": "file", "name": "dag.md", "url": "https://api.github.com/x/dag.md"},
+                {"type": "file", "name": "config.yml", "url": "https://api.github.com/x/config.yml"},
+            ])
+        content = base64.b64encode("---\nname: DAG de Dados\nabout: DAG\n---\n## Contexto\n".encode()).decode()
+        return httpx.Response(200, json={"content": content})
+
+    reader = GitHubReader("t", "org", transport=httpx.MockTransport(handler))
+    templates = reader.templates("rag")
+    assert [t.name for t in templates] == ["DAG de Dados"]  # o .yml (formulário) fica de fora
+    assert reader.templates("rag") is templates  # cache

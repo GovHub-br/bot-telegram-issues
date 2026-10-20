@@ -108,6 +108,7 @@ DRAFT = {
         {"repo": "rag", "number": 3, "title": "Card antigo", "state": "closed", "url": "https://gh/rag/3"},
     ],
     "modelo": "qwen-teste",
+    "template": "DAG de Dados",
 }
 
 
@@ -179,6 +180,7 @@ async def test_assisted_flow_creates_issue_with_suggested_and_default_labels():
         assert "Parece duplicada de" in preview and "web#12" in preview
         assert "rag#3" in preview  # parecida, de outro repositório
         assert "<b>Repositório:</b>" in preview and ">rag</a>" in preview
+        assert "<b>Modelo:</b> 📄 DAG de Dados" in preview
         assert "Retriever erra coluna de faturamento" in preview
         assert "<code>arquitetura</code> <code>bug</code>" in preview
 

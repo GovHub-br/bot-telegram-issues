@@ -33,6 +33,7 @@ class Draft:
     duplicate_of: tuple[str, int] | None = None  # (repo, número)
     similar: list[Similar] = field(default_factory=list)
     model: str = ""
+    template: str | None = None  # nome do template de issue usado
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> Draft:
@@ -45,6 +46,7 @@ class Draft:
                 Similar(s["repo"], s["number"], s["title"], s["state"], s["url"]) for s in data.get("similares") or []
             ],
             model=data.get("modelo", ""),
+            template=data.get("template"),
         )
 
 

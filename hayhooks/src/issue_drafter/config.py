@@ -19,8 +19,10 @@ class DrafterSettings:
     ollama_model: str
     ollama_timeout: int = 120
     default_labels: tuple[str, ...] = ()
-    max_agent_steps: int = 5
+    max_agent_steps: int = 6
     github_repos: tuple[str, ...] = ()  # vazio = todos os repositórios da organização
+    # Repositório cujos templates de issue valem para quem não tem templates próprios.
+    templates_repo: str | None = None
 
     @classmethod
     def from_env(cls) -> DrafterSettings:
@@ -35,5 +37,6 @@ class DrafterSettings:
             ollama_model=os.environ["OLLAMA_MODEL"].strip(),
             ollama_timeout=int(os.getenv("OLLAMA_TIMEOUT", "120")),
             default_labels=tuple(lb.strip() for lb in os.getenv("DEFAULT_LABELS", "").split(",") if lb.strip()),
-            max_agent_steps=int(os.getenv("DRAFT_MAX_STEPS", "5")),
+            max_agent_steps=int(os.getenv("DRAFT_MAX_STEPS", "6")),
+            templates_repo=os.getenv("ISSUE_TEMPLATES_REPO", "").strip() or None,
         )

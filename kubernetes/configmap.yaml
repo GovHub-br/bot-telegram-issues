@@ -11,6 +11,8 @@ data:
   GITHUB_PROJECT: GovHub-br/4
   PROJECT_STATUS: Project Backlog
   DEFAULT_LABELS: arquitetura
+  # Templates de issue usados quando o repositório escolhido não tem os seus.
+  ISSUE_TEMPLATES_REPO: data-application-cidades
   # Só o grupo do time usa o bot; o privado fica fechado.
   ALLOWED_CHATS: "-1002044620274"
   ALLOWED_USERS: ""

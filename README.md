@@ -49,6 +49,7 @@ Telegram ──/nova → 📦 repo → "o retriever erra a coluna…"──► b
                                                                                    │
                                      Agent do Haystack (OllamaChatGenerator, qwen3.8:27b-mlx)
                                        ├─ buscar_issues(termos)   → GitHub Search na organização toda (só leitura)
+                                       ├─ ler_template(nome)      → modelo de issue do repositório (.github/ISSUE_TEMPLATE)
                                        └─ propor_issue(title, body, labels, duplicada_de)  ← saída
                                                                                    │
 bot ◄── {title, body, labels, duplicada_de, similares} ◄──────────────────────────┘
@@ -57,6 +58,7 @@ bot ◄── {title, body, labels, duplicada_de, similares} ◄─────�
 
 - **Por que um Agent:** ele decide os termos da busca de duplicadas, cita as relacionadas no corpo e só termina ao chamar `propor_issue`. O Agent **não cria nem altera** nada no GitHub; as tools dele só leem.
 - **Por que tool calling para a saída:** os modelos MLX do Ollama recusam saída estruturada (`format`/JSON schema). Por isso o rascunho chega como argumentos da tool `propor_issue`, com as labels restritas por `enum` às que existem **no repositório escolhido**. A busca de duplicadas cobre todos os repositórios, porque o Project junta todos.
+- **Templates de issue:** o Agent escolhe o modelo que combina com o relato (DAG, dbt, extração, dashboard…), lê o modelo e preenche todas as seções. Campos que o relato não informa ficam como `a definir`. Ele usa os templates do próprio repositório escolhido; se o repositório não tiver, usa os de `ISSUE_TEMPLATES_REPO` (hoje os 14 do `data-application-cidades`). Os templates são lidos do GitHub e ficam em cache por 10 minutos, então editar um template no GitHub já muda o bot.
 - **Fallback:** se o Hayhooks estiver fora do ar, demorar ou o modelo não propuser a issue, o bot avisa e segue no **modo manual**, e o texto da pessoa vira a descrição. Com `HAYHOOKS_URL` vazio, o `/nova` é sempre manual.
 - **Tempo:** cerca de 15 a 20 s por rascunho com o `qwen3.8:27b-mlx` (`think` desligado). O bot atende outras mensagens enquanto isso.
 - **Open WebUI:** o mesmo endpoint responde no contrato OpenAI-compatível (modelo `issue_draft`) com o rascunho em Markdown.
@@ -103,6 +105,7 @@ cp .env.example .env
 | `GITHUB_PROJECT` | `GovHub-br/4` ou a URL do Project |
 | `PROJECT_STATUS` | `Project Backlog` (coluna inicial no Project) |
 | `DEFAULT_LABELS` | `arquitetura` (labels já marcadas na criação) |
+| `ISSUE_TEMPLATES_REPO` | `data-application-cidades` (templates usados quando o repositório escolhido não tem os seus) |
 | `HAYHOOKS_URL` | `http://localhost:1416` (vazio = `/nova` só manual; no compose vira `http://hayhooks:1416`) |
 | `OLLAMA_URL` | `http://10.0.0.10:11434` (usado pelo Hayhooks) |
 | `OLLAMA_MODEL` | `qwen3.8:27b-mlx` (precisa suportar tools) |

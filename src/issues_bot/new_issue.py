@@ -31,7 +31,8 @@ log = logging.getLogger(__name__)
 REPO, DESCRIBE, TITLE, BODY, LABELS, CONFIRM = range(6)
 MAX_TITLE = 256
 MAX_LABEL_OPTIONS = 24
-PREVIEW_BODY = 1500
+PREVIEW_BODY = 2500
+TELEGRAM_LIMIT = 4096
 
 
 def drafter(context: Ctx) -> DrafterClient | None:
@@ -75,7 +76,7 @@ async def start(update: Update, context: Ctx) -> int:
     payload = command_payload(update.effective_message)
     draft = context.user_data["draft"] = {
         "repo": "", "text": "", "title": "", "body": "", "labels": [], "options": [], "suggested": [],
-        "similar": [], "duplicate_of": None, "model": "", "editing": False, "prefilled": False,
+        "similar": [], "duplicate_of": None, "model": "", "template": None, "editing": False, "prefilled": False,
     }
 
     if "|" in payload:
@@ -180,6 +181,7 @@ async def assisted(update: Update, context: Ctx, text: str) -> int:
         "similar": result.similar,
         "duplicate_of": result.duplicate_of,
         "model": result.model,
+        "template": result.template,
     }
     await edit(status, f"🤖 Rascunho pronto: <b>{escape(result.title)}</b>")
     return await ask_labels(update, context)
@@ -277,17 +279,28 @@ async def labels_done(update: Update, context: Ctx) -> int:
 
 
 def preview(draft: dict[str, Any], context: Ctx) -> str:
+    # O escape de HTML pode inflar a descrição: encurta até caber numa mensagem.
+    for limit in (PREVIEW_BODY, 1500, 700):
+        text = _preview(draft, context, limit)
+        if len(text) <= TELEGRAM_LIMIT:
+            return text
+    return _preview(draft, context, 200)
+
+
+def _preview(draft: dict[str, Any], context: Ctx, body_limit: int) -> str:
     lines = ["📝 <b>Revise a nova issue</b>", ""]
     similar = {(s.repo, s.number): s for s in draft["similar"]}
     dup = similar.get(draft["duplicate_of"]) if draft["duplicate_of"] else None
     if dup:
         lines += [f'⚠️ <b>Parece duplicada de <a href="{dup.url}">{escape(dup.ref)}</a></b> · {escape(dup.title)}', ""]
     lines.append(f'<b>Repositório:</b> <a href="https://github.com/{gh(context).org}/{draft["repo"]}">{escape(draft["repo"])}</a>')
+    if draft["template"]:
+        lines.append(f"<b>Modelo:</b> 📄 {escape(draft['template'])}")
     lines.append(f"<b>Título:</b> {escape(draft['title'])}")
     if draft["labels"]:
         lines.append("<b>Labels:</b> " + " ".join(f"<code>{escape(lb)}</code>" for lb in draft["labels"]))
     body = draft["body"].strip()
-    lines += ["", f"<blockquote expandable>{escape(truncate(body, PREVIEW_BODY))}</blockquote>" if body else "<i>Sem descrição.</i>"]
+    lines += ["", f"<blockquote expandable>{escape(truncate(body, body_limit))}</blockquote>" if body else "<i>Sem descrição.</i>"]
     others = [s for s in draft["similar"] if (s.repo, s.number) != draft["duplicate_of"]]
     if others:
         links = [

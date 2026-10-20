@@ -27,7 +27,7 @@ from haystack_integrations.components.generators.ollama import OllamaChatGenerat
 from jinja2 import Template
 
 from .config import DrafterSettings
-from .github import GitHubReader
+from .github import GitHubReader, IssueTemplate
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +69,8 @@ class IssueDrafter:
             url=settings.ollama_url,
             timeout=settings.ollama_timeout,
             think=False,
-            generation_kwargs={"temperature": 0.2, "num_ctx": 8192},
+            # Contexto maior: o template lido entra na conversa junto com a busca.
+            generation_kwargs={"temperature": 0.2, "num_ctx": 16384},
         )
         self._prompt = Template(files("issue_drafter").joinpath("prompts/system.md").read_text("utf-8"))
 
@@ -95,9 +96,33 @@ class IssueDrafter:
         )
 
     @staticmethod
-    def _propose_tool(labels: list[str]) -> Tool:
-        def propor_issue(title: str, body: str, labels: list[str], duplicada_de: str | None = None) -> dict[str, Any]:
-            return {"title": title, "body": body, "labels": labels, "duplicada_de": duplicada_de}
+    def _template_tool(templates: list[IssueTemplate]) -> Tool:
+        by_name = {t.name: t for t in templates}
+
+        def ler_template(nome: str) -> str:
+            tpl = by_name.get(nome) or next((t for t in templates if t.name.lower() == nome.strip().lower()), None)
+            if not tpl:
+                return f"Template {nome!r} não existe. Opções: {', '.join(by_name)}"
+            log.info("ler_template(%r)", tpl.name)
+            return tpl.body
+
+        return Tool(
+            name="ler_template",
+            description="Devolve o modelo (Markdown) de um tipo de issue, para ser preenchido.",
+            parameters={
+                "type": "object",
+                "properties": {"nome": {"type": "string", "enum": list(by_name)}},
+                "required": ["nome"],
+            },
+            function=ler_template,
+        )
+
+    @staticmethod
+    def _propose_tool(labels: list[str], template_names: list[str]) -> Tool:
+        def propor_issue(
+            title: str, body: str, labels: list[str], duplicada_de: str | None = None, template: str | None = None
+        ) -> dict[str, Any]:
+            return {"title": title, "body": body, "labels": labels, "duplicada_de": duplicada_de, "template": template}
 
         return Tool(
             name="propor_issue",
@@ -117,6 +142,11 @@ class IssueDrafter:
                         "type": "string",
                         "description": "repositorio#numero da issue aberta duplicada, se houver",
                     },
+                    **(
+                        {"template": {"type": "string", "enum": template_names, "description": "Modelo usado"}}
+                        if template_names
+                        else {}
+                    ),
                 },
                 "required": ["title", "body", "labels"],
             },
@@ -134,18 +164,34 @@ class IssueDrafter:
             raise DraftError(f"não consegui ler as labels de {repo}") from exc
         return defaults + [lb for lb in repo_labels if lb not in defaults]
 
+    def issue_templates(self, repo: str | None) -> list[IssueTemplate]:
+        """Templates do próprio repositório; sem eles, os do ISSUE_TEMPLATES_REPO."""
+        try:
+            for source in (repo, self.settings.templates_repo):
+                if source and (found := self.github.templates(source)):
+                    return found
+        except httpx.HTTPError as exc:
+            log.warning("Não consegui ler os templates de issue: %s", exc)
+        return []
+
     def draft(self, texto: str, repo: str | None = None) -> dict[str, Any]:
         texto = texto.strip()
         if not texto:
             raise DraftError("O relato está vazio.")
 
         labels = self.allowed_labels(repo)
+        templates = self.issue_templates(repo)
         system_prompt = self._prompt.render(
-            org=self.settings.github_org, repo=repo, labels=labels, default_labels=self.settings.default_labels
+            org=self.settings.github_org, repo=repo, labels=labels, default_labels=self.settings.default_labels,
+            templates=templates,
         )
+        tools = [self._search_tool()]
+        if templates:
+            tools.append(self._template_tool(templates))
+        tools.append(self._propose_tool(labels, [t.name for t in templates]))
         agent = Agent(
             chat_generator=self.chat_generator,
-            tools=[self._search_tool(), self._propose_tool(labels)],
+            tools=tools,
             system_prompt=system_prompt,
             exit_conditions=["propor_issue"],
             max_agent_steps=self.settings.max_agent_steps,
@@ -159,9 +205,15 @@ class IssueDrafter:
             last = result.get("last_message")
             log.warning("O modelo terminou sem chamar propor_issue: %s", last.text if last else None)
             raise DraftError("O modelo não chegou a propor a issue.")
-        return self._clean(rascunho, result.get("similares") or [], labels)
+        return self._clean(rascunho, result.get("similares") or [], labels, templates)
 
-    def _clean(self, rascunho: dict[str, Any], similares: list[dict[str, Any]], allowed: list[str]) -> dict[str, Any]:
+    def _clean(
+        self,
+        rascunho: dict[str, Any],
+        similares: list[dict[str, Any]],
+        allowed: list[str],
+        templates: list[IssueTemplate] = (),
+    ) -> dict[str, Any]:
         title = " ".join(str(rascunho.get("title", "")).split()).rstrip(".")
         if not title:
             raise DraftError("O modelo propôs uma issue sem título.")
@@ -174,6 +226,9 @@ class IssueDrafter:
             name = lookup.get(str(lb).strip().lower())
             if name and name not in labels:
                 labels.append(name)
+        template = next((t for t in templates if t.name == rascunho.get("template")), None)
+        if template:  # labels definidas no próprio template entram junto
+            labels += [lookup[lb.lower()] for lb in template.labels if lb.lower() in lookup and lookup[lb.lower()] not in labels]
         labels = labels[:MAX_LABELS] or list(self.settings.default_labels)
 
         unique: dict[tuple[str, int], dict[str, Any]] = {}
@@ -186,6 +241,7 @@ class IssueDrafter:
             "labels": labels,
             "duplicada_de": self._duplicate(rascunho.get("duplicada_de"), unique),
             "similares": list(unique.values())[:5],
+            "template": template.name if template else None,
             "modelo": self.settings.ollama_model,
         }
 
@@ -209,6 +265,8 @@ class IssueDrafter:
 def to_markdown(draft: dict[str, Any]) -> str:
     """Versão legível do rascunho, usada na resposta para o Open WebUI."""
     parts = [f"### {draft['title']}", "", "**Labels:** " + ", ".join(f"`{lb}`" for lb in draft["labels"]), ""]
+    if draft.get("template"):
+        parts += [f"**Modelo:** {draft['template']}", ""]
     if draft["duplicada_de"]:
         dup = draft["duplicada_de"]
         parts += [f"> ⚠️ Pode ser duplicada de {dup['repo']}#{dup['number']}", ""]
