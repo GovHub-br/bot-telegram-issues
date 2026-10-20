@@ -21,6 +21,8 @@ spec:
         app.kubernetes.io/name: bot
     spec:
       automountServiceAccountToken: false
+      # Não injeta variáveis dos Services do namespace no ambiente (ver hayhooks.yaml).
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

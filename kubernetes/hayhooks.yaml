@@ -16,6 +16,9 @@ spec:
         app.kubernetes.io/name: hayhooks
     spec:
       automountServiceAccountToken: false
+      # Sem isso o Kubernetes injeta HAYHOOKS_PORT=tcp://<ip>:1416 (variável do Service
+      # "hayhooks"), e o Hayhooks lê HAYHOOKS_PORT como a porta dele e não sobe.
+      enableServiceLinks: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
