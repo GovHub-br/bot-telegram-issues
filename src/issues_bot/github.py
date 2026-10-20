@@ -10,6 +10,8 @@ from typing import Any, Literal
 
 import httpx
 
+from .people import Person
+
 API_URL = "https://api.github.com"
 REPOS_TTL = 600  # segundos de cache da lista de repositórios
 
@@ -132,6 +134,7 @@ class GitHubClient:
         self.only_repos = only_repos
         self._repos: list[Repo] = []
         self._repos_at = 0.0
+        self._people: dict[str, tuple[float, list[Person]]] = {}
         self._http = httpx.AsyncClient(
             base_url=API_URL,
             headers={
@@ -184,6 +187,25 @@ class GitHubClient:
             if repo.name.lower() == name.lower():
                 return repo.name
         raise GitHubError(404, f"Repositório {name!r} não encontrado ou não liberado para o bot")
+
+    async def assignable_people(self, repo: str) -> list[Person]:
+        """Quem pode ser responsável por issues no repositório (login e nome do perfil)."""
+        repo = await self.resolve_repo(repo)
+        cached = self._people.get(repo)
+        if cached and time.monotonic() - cached[0] < REPOS_TTL:
+            return cached[1]
+        people: list[Person] = []
+        after = None
+        while True:
+            page = (await self._graphql(_ASSIGNABLE, owner=self.org, repo=repo, after=after))["repository"][
+                "assignableUsers"
+            ]
+            people += [Person(n["login"], n.get("name") or "") for n in page["nodes"]]
+            if not page["pageInfo"]["hasNextPage"]:
+                break
+            after = page["pageInfo"]["endCursor"]
+        self._people[repo] = (time.monotonic(), people)
+        return people
 
     async def list_labels(self, repo: str) -> list[Label]:
         resp = await self._request("GET", f"/repos/{self.org}/{repo}/labels", params={"per_page": 100})
@@ -266,11 +288,20 @@ class GitHubClient:
 
     # ---- escrita (só criar issue e comentar) -------------------------------------
 
-    async def create_issue(self, repo: str, title: str, body: str = "", labels: list[str] | None = None) -> Issue:
+    async def create_issue(
+        self,
+        repo: str,
+        title: str,
+        body: str = "",
+        labels: list[str] | None = None,
+        assignees: list[str] | None = None,
+    ) -> Issue:
         repo = await self.resolve_repo(repo)
         payload: dict[str, Any] = {"title": title, "body": body}
         if labels:
             payload["labels"] = labels
+        if assignees:
+            payload["assignees"] = assignees
         data = (await self._request("POST", f"/repos/{self.org}/{repo}/issues", json=payload)).json()
         return Issue.from_api(data)
 
@@ -321,6 +352,16 @@ class GitHubClient:
         await self._graphql(_SET_STATUS, project=project.id, item=item_id, field=project.status_field, option=option)
         return status
 
+
+_ASSIGNABLE = """
+query($owner: String!, $repo: String!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    assignableUsers(first: 100, after: $after) {
+      nodes { login name }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
 
 _PROJECT_QUERY = """
 query($owner: String!, $number: Int!) {

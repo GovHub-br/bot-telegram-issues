@@ -24,11 +24,12 @@ from . import keyboards
 from .drafter import DrafterClient, DraftUnavailable
 from .formatting import split_title_body, telegram_signature, truncate
 from .github import GitHubError, Issue
+from .people import Person, find_people
 from .handlers import Ctx, cancel_command, command_payload, edit, gh, org_link, restricted, settings, typing
 
 log = logging.getLogger(__name__)
 
-REPO, DESCRIBE, TITLE, BODY, LABELS, CONFIRM = range(6)
+REPO, DESCRIBE, TITLE, BODY, LABELS, CONFIRM, WHO = range(7)
 MAX_TITLE = 256
 MAX_LABEL_OPTIONS = 24
 PREVIEW_BODY = 2500
@@ -77,6 +78,7 @@ async def start(update: Update, context: Ctx) -> int:
     draft = context.user_data["draft"] = {
         "repo": "", "text": "", "title": "", "body": "", "labels": [], "options": [], "suggested": [],
         "similar": [], "duplicate_of": None, "model": "", "template": None, "editing": False, "prefilled": False,
+        "assignee": None, "assignee_options": [],
     }
 
     if "|" in payload:
@@ -126,9 +128,19 @@ async def repo_chosen(update: Update, context: Ctx) -> int:
         draft["editing"] = False
         if changed:
             draft["options"] = []
+            await drop_unassignable(context, draft)
         return await ask_labels(update, context, edit_in=query.message)
     await edit(query.message, f"📦 Repositório: <b>{escape(repo)}</b>")
     return await after_repo(update, context)
+
+
+async def drop_unassignable(context: Ctx, draft: dict[str, Any]) -> None:
+    """Ao trocar de repositório, tira o responsável (e os candidatos) que não podem ser
+    atribuídos no novo."""
+    people = {p.login.lower() for p in await gh(context).assignable_people(draft["repo"])}
+    draft["assignee_options"] = [p for p in draft["assignee_options"] if p.login.lower() in people]
+    if draft["assignee"] and draft["assignee"].login.lower() not in people:
+        draft["assignee"] = None
 
 
 async def after_repo(update: Update, context: Ctx) -> int:
@@ -182,6 +194,8 @@ async def assisted(update: Update, context: Ctx, text: str) -> int:
         "duplicate_of": result.duplicate_of,
         "model": result.model,
         "template": result.template,
+        "assignee": result.assignee,
+        "assignee_options": result.assignee_options,
     }
     await edit(status, f"🤖 Rascunho pronto: <b>{escape(result.title)}</b>")
     return await ask_labels(update, context)
@@ -299,6 +313,8 @@ def _preview(draft: dict[str, Any], context: Ctx, body_limit: int) -> str:
     lines.append(f"<b>Título:</b> {escape(draft['title'])}")
     if draft["labels"]:
         lines.append("<b>Labels:</b> " + " ".join(f"<code>{escape(lb)}</code>" for lb in draft["labels"]))
+    if draft["assignee"]:
+        lines.append(f"<b>Responsável:</b> 👤 {escape(draft['assignee'].label)}")
     body = draft["body"].strip()
     lines += ["", f"<blockquote expandable>{escape(truncate(body, body_limit))}</blockquote>" if body else "<i>Sem descrição.</i>"]
     others = [s for s in draft["similar"] if (s.repo, s.number) != draft["duplicate_of"]]
@@ -344,6 +360,10 @@ async def confirm(update: Update, context: Ctx) -> int | None:
         draft["editing"] = True
         return await ask_repo(update, context, edit_in=query.message)
 
+    if action == "e:who":
+        await query.answer()
+        return await show_assignee_picker(update, context, edit_in=query.message)
+
     if action in ("e:title", "e:body"):
         await query.answer()
         draft["editing"] = True
@@ -359,6 +379,57 @@ async def confirm(update: Update, context: Ctx) -> int | None:
     return ConversationHandler.END
 
 
+# ---- responsável ---------------------------------------------------------------
+
+
+async def show_assignee_picker(
+    update: Update, context: Ctx, *, edit_in: Message | None = None, intro: str = ""
+) -> int:
+    draft = draft_of(context)
+    text = intro + "👤 <b>Responsável pela issue</b>"
+    if draft["assignee_options"]:
+        text += "\nOs mais parecidos com o nome pedido:"
+    markup = keyboards.assignee_picker(draft["assignee_options"], draft["assignee"])
+    if edit_in:
+        await edit(edit_in, text, markup)
+    else:
+        await update.effective_message.reply_text(text, reply_markup=markup)
+    return CONFIRM
+
+
+async def pick_assignee(update: Update, context: Ctx) -> int:
+    query = update.callback_query
+    choice = query.data.split(":", 2)[2]
+    draft = draft_of(context)
+
+    if choice == "?":
+        await query.answer()
+        await query.message.edit_reply_markup(None)
+        await ask(update, "🔎 Qual o nome da pessoa? Pode ser aproximado.", "Nome ou login do GitHub")
+        return WHO
+    if choice == "-":
+        draft["assignee"] = None
+    elif choice != "<":
+        people = {p.login.lower(): p for p in await gh(context).assignable_people(draft["repo"])}
+        person = people.get(choice.lower())
+        if not person:
+            await query.answer("Essa pessoa não pode ser responsável neste repositório.", show_alert=True)
+            return CONFIRM
+        draft["assignee"] = person
+    await query.answer()
+    return await show_preview(update, context, edit_in=query.message)
+
+
+async def got_who(update: Update, context: Ctx) -> int:
+    draft = draft_of(context)
+    name = update.effective_message.text.strip()
+    await typing(update, context)
+    matches = find_people(name, await gh(context).assignable_people(draft["repo"]), limit=5)
+    draft["assignee_options"] = [m.person for m in matches]
+    intro = "" if matches else f"Não achei ninguém parecido com <b>{escape(name)}</b> em {escape(draft['repo'])}.\n\n"
+    return await show_assignee_picker(update, context, intro=intro)
+
+
 async def create(update: Update, context: Ctx, message: Message) -> None:
     # O rascunho só sai do user_data depois de criado: se o GitHub falhar, dá para tentar de novo.
     draft = draft_of(context)
@@ -366,11 +437,14 @@ async def create(update: Update, context: Ctx, message: Message) -> None:
     user = update.effective_user
     note = f"rascunho gerado com {draft['model']}" if draft["model"] else None
     body = (draft["body"].strip() + telegram_signature(user.full_name, user.username, note)).lstrip()
-    issue = await gh(context).create_issue(draft["repo"], draft["title"], body, draft["labels"])
+    assignees = [draft["assignee"].login] if draft["assignee"] else None
+    issue = await gh(context).create_issue(draft["repo"], draft["title"], body, draft["labels"], assignees)
     log.info("Issue %s criada por %s", issue.ref, user.id)
     text = f'✅ Issue <a href="{issue.url}"><b>{escape(issue.ref)}</b></a> criada!\n<i>{escape(issue.title)}</i>'
     if issue.labels:
         text += "\n" + " ".join(f"<code>{escape(lb)}</code>" for lb in issue.labels)
+    if issue.assignees:
+        text += "\n👤 " + ", ".join(f"@{escape(a)}" for a in issue.assignees)
     project_line, project_url = await put_in_project(context, issue)
     await edit(message, text + project_line, keyboards.open_issue(issue, project_url))
 
@@ -419,9 +493,13 @@ def conversation() -> ConversationHandler:
                     MessageHandler(text, unexpected),
                 ],
                 CONFIRM: [
-                    CallbackQueryHandler(confirm, pattern=r"^n:(create|cancel|e:title|e:body|e:labels|e:repo)$"),
+                    CallbackQueryHandler(
+                        confirm, pattern=r"^n:(create|cancel|e:title|e:body|e:labels|e:repo|e:who)$"
+                    ),
+                    CallbackQueryHandler(pick_assignee, pattern=r"^n:a:"),
                     MessageHandler(text, unexpected),
                 ],
+                WHO: [MessageHandler(text, got_who)],
             },
             fallbacks=[CommandHandler("cancelar", cancel_command)],
             allow_reentry=True,

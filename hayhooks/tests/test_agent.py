@@ -7,6 +7,7 @@ from haystack.dataclasses import ChatMessage, ToolCall
 from issue_drafter.agent import DraftError, IssueDrafter, to_markdown
 from issue_drafter.config import DrafterSettings, _url
 from issue_drafter.github import IssueTemplate, parse_template
+from issue_drafter.people import Person, find_people
 
 SETTINGS = DrafterSettings(
     github_token="t", github_org="org", ollama_url="http://x", ollama_model="m", default_labels=("arquitetura",)
@@ -32,7 +33,11 @@ class FakeGitHub:
         self.found = found or []
         self.queries: list[str] = []
         self.templates_by_repo = templates or {}
+        self.people: list[Person] = []
         self.templates_asked: list[str] = []
+
+    def assignable_people(self, repo):
+        return self.people
 
     def templates(self, repo):
         self.templates_asked.append(repo)
@@ -244,3 +249,61 @@ def test_github_reader_retries_dropped_connections_and_reads_templates():
     templates = reader.templates("rag")
     assert [t.name for t in templates] == ["DAG de Dados"]  # o .yml (formulário) fica de fora
     assert reader.templates("rag") is templates  # cache
+
+
+PEOPLE = [
+    Person("bottinolucas", "Lucas Bottino"),
+    Person("jlucasiqueira", "Joao Lucas Araujo Siqueira"),
+    Person("lcsgborges", "Lucas Guimarães Borges"),
+    Person("arthrok", "Arthur Alves"),
+]
+
+
+@pytest.mark.parametrize(
+    "query, best",
+    [("lucas botino", "bottinolucas"), ("Botino", "bottinolucas"), ("lucas borges", "lcsgborges"),
+     ("joão lucas", "jlucasiqueira"), ("@arthrok", "arthrok")],
+)
+def test_find_people_ranks_the_closest_name_first(query, best):
+    assert find_people(query, PEOPLE)[0].person.login == best
+
+
+def test_find_people_ignores_weak_matches():
+    assert find_people("zé ninguém", PEOPLE) == []
+
+
+def test_assignee_from_buscar_pessoa():
+    drafter, gen, gh = make([
+        call("buscar_pessoa", nome="lucas botino"),
+        call("propor_issue", title="T", body="B", labels=["bug"], responsavel="bottinolucas"),
+    ])
+    gh.people = PEOPLE
+    draft = drafter.draft("arruma a dag, deixe como responsável o lucas botino", "rag")
+    assert draft["responsavel"] == {"login": "bottinolucas", "name": "Lucas Bottino"}
+    assert [c["login"] for c in draft["candidatos_responsavel"]][0] == "bottinolucas"
+    assert "bottinolucas — Lucas Bottino" in gen.seen[1][-1].tool_call_result.result
+    assert "buscar_pessoa" in gen.seen[0][0].text
+
+
+def test_assignee_not_returned_by_the_search_is_ignored():
+    drafter, _, gh = make([call("propor_issue", title="T", body="B", labels=["bug"], responsavel="arthrok")])
+    gh.people = PEOPLE
+    draft = drafter.draft("relato sem pedir responsável", "rag")
+    assert draft["responsavel"] is None and draft["candidatos_responsavel"] == []
+
+
+def test_ambiguous_name_leaves_assignee_empty_but_keeps_candidates():
+    drafter, _, gh = make([
+        call("buscar_pessoa", nome="lucas"),
+        call("propor_issue", title="T", body="B", labels=["bug"]),
+    ])
+    gh.people = PEOPLE
+    draft = drafter.draft("responsável: lucas", "rag")
+    assert draft["responsavel"] is None
+    assert len(draft["candidatos_responsavel"]) == 3
+
+
+def test_without_people_there_is_no_person_tool():
+    drafter, gen, _ = make([call("propor_issue", title="T", body="B", labels=["bug"])])
+    drafter.draft("relato", "rag")
+    assert "buscar_pessoa" not in gen.seen[0][0].text

@@ -75,15 +75,26 @@ class FakeGitHub:
             payload = json.loads(req.content) | {"repo": repo}
             self.created.append(payload)
             return httpx.Response(201, json={
+                "assignees": [{"login": a} for a in payload.get("assignees", [])],
                 "number": 77, "node_id": "I_77", "title": payload["title"], "state": "open",
                 "html_url": f"https://gh/{repo}/77", "repository_url": f"https://api.github.com/repos/o/{repo}",
                 "user": {"login": "x"}, "labels": [{"name": lb} for lb in payload.get("labels", [])],
             })
         raise AssertionError(f"chamada inesperada ao GitHub: {req.method} {req.url}")
 
+    PEOPLE = {
+        "rag": [{"login": "bottinolucas", "name": "Lucas Bottino"}, {"login": "lcsgborges", "name": "Lucas Guimarães Borges"},
+                {"login": "arthrok", "name": "Arthur Alves"}],
+        "web": [{"login": "arthrok", "name": "Arthur Alves"}],
+    }
+
     def _graphql(self, body: dict[str, Any]) -> httpx.Response:
         self.graphql.append(body)
         q = body["query"]
+        if "assignableUsers" in q:
+            nodes = self.PEOPLE[body["variables"]["repo"]]
+            return httpx.Response(200, json={"data": {"repository": {"assignableUsers": {
+                "nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}}}})
         if "projectV2(number" in q:
             return httpx.Response(200, json={"data": {"organization": {"projectV2": {
                 "id": "P1", "title": "Gov Hub - Project Management", "url": "https://gh/projects/4",
@@ -109,6 +120,11 @@ DRAFT = {
     ],
     "modelo": "qwen-teste",
     "template": "DAG de Dados",
+    "responsavel": {"login": "bottinolucas", "name": "Lucas Bottino"},
+    "candidatos_responsavel": [
+        {"login": "bottinolucas", "name": "Lucas Bottino", "score": 96},
+        {"login": "lcsgborges", "name": "Lucas Guimarães Borges", "score": 67},
+    ],
 }
 
 
@@ -181,6 +197,7 @@ async def test_assisted_flow_creates_issue_with_suggested_and_default_labels():
         assert "rag#3" in preview  # parecida, de outro repositório
         assert "<b>Repositório:</b>" in preview and ">rag</a>" in preview
         assert "<b>Modelo:</b> 📄 DAG de Dados" in preview
+        assert "<b>Responsável:</b> 👤 Lucas Bottino (@bottinolucas)" in preview
         assert "Retriever erra coluna de faturamento" in preview
         assert "<code>arquitetura</code> <code>bug</code>" in preview
 
@@ -189,13 +206,14 @@ async def test_assisted_flow_creates_issue_with_suggested_and_default_labels():
         assert "#77" in done and "criada" in done
         assert "No Project" in done and "Project Backlog" in done
 
-    add, status = h.github.graphql[1:]
+    add, status = [g for g in h.github.graphql if "Project" in g["query"] and "projectV2(number" not in g["query"]]
     assert add["variables"] == {"project": "P1", "content": "I_77"}
     assert status["variables"] == {"project": "P1", "item": "IT1", "field": "F1", "option": "O1"}
 
     created = h.github.created[0]
     assert created["repo"] == "rag"
     assert created["labels"] == ["arquitetura", "bug"]
+    assert created["assignees"] == ["bottinolucas"]
     assert created["body"].startswith("## Contexto")
     assert "Enviado via Telegram por Ana (@ana) · rascunho gerado com qwen-teste" in created["body"]
 
@@ -314,3 +332,66 @@ async def test_last_used_repo_comes_first():
         await h.send("/nova")
         markup = [p for e, p in h.tg.sent if e == "sendMessage"][-1]["reply_markup"]
         assert markup["inline_keyboard"][0][0]["text"] == "⭐ web"
+
+
+def last_keyboard(h) -> list[list[dict]]:
+    sent = [p for e, p in h.tg.sent if e in ("sendMessage", "editMessageText") and p.get("reply_markup")]
+    return sent[-1]["reply_markup"]["inline_keyboard"]
+
+
+async def test_change_assignee_to_another_candidate():
+    async with Harness(hayhooks_ok) as h:
+        await h.send("/nova o retriever erra a coluna")
+        await h.click("n:r:rag")
+        await h.click("n:ok")
+        await h.click("n:e:who")
+        buttons = [b["text"] for row in last_keyboard(h) for b in row]
+        assert buttons[:2] == ["✅ Lucas Bottino (@bottinolucas)", "👤 Lucas Guimarães Borges (@lcsgborges)"]
+        await h.click("n:a:lcsgborges")
+        assert "Responsável:</b> 👤 Lucas Guimarães Borges" in h.tg.texts()[-1]
+        await h.click("n:create")
+        assert "👤 @lcsgborges" in h.tg.texts()[-1]
+    assert h.github.created[0]["assignees"] == ["lcsgborges"]
+
+
+async def test_search_assignee_by_name_in_manual_flow():
+    async with Harness() as h:
+        await h.send("/nova Título | corpo")
+        await h.click("n:r:rag")
+        await h.click("n:ok")
+        assert "Responsável" not in h.tg.texts()[-1]
+        await h.click("n:e:who")
+        await h.click("n:a:?")
+        assert "Qual o nome da pessoa" in h.tg.texts()[-1]
+        await h.send("lucas botino")
+        assert last_keyboard(h)[0][0]["callback_data"] == "n:a:bottinolucas"
+        await h.click("n:a:bottinolucas")
+        await h.click("n:create")
+    assert h.github.created[0]["assignees"] == ["bottinolucas"]
+
+
+async def test_remove_assignee_and_refuse_unknown_login():
+    async with Harness(hayhooks_ok) as h:
+        await h.send("/nova o retriever erra a coluna")
+        await h.click("n:r:rag")
+        await h.click("n:ok")
+        await h.click("n:a:fulano")  # login que não pode ser responsável em rag
+        alerts = [p for e, p in h.tg.sent if e == "answerCallbackQuery" and p.get("show_alert")]
+        assert "não pode ser responsável" in alerts[-1]["text"]
+        await h.click("n:a:-")
+        assert "Responsável" not in h.tg.texts()[-1]
+        await h.click("n:create")
+    assert "assignees" not in h.github.created[0]
+
+
+async def test_changing_repo_drops_assignee_who_cannot_be_assigned_there():
+    async with Harness(hayhooks_ok) as h:
+        await h.send("/nova o retriever erra a coluna")
+        await h.click("n:r:rag")
+        await h.click("n:ok")
+        await h.click("n:e:repo")
+        await h.click("n:r:web")  # bottinolucas não pode ser responsável em web
+        await h.click("n:ok")
+        assert "Responsável" not in h.tg.texts()[-1]
+        await h.click("n:create")
+    assert h.github.created[0]["repo"] == "web" and "assignees" not in h.github.created[0]

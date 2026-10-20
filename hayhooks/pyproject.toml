@@ -8,6 +8,7 @@ dependencies = [
     "hayhooks==1.22.0",
     "ollama-haystack==6.8.0",
     "httpx>=0.27",
+    "rapidfuzz>=3.9",
 ]
 
 [dependency-groups]

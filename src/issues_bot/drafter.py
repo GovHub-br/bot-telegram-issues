@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from .people import Person
+
 
 class DraftUnavailable(RuntimeError):
     """O assistente não respondeu ou não conseguiu montar o rascunho; o bot cai no modo manual."""
@@ -34,6 +36,8 @@ class Draft:
     similar: list[Similar] = field(default_factory=list)
     model: str = ""
     template: str | None = None  # nome do template de issue usado
+    assignee: Person | None = None  # responsável pedido no relato, se o Agent achou
+    assignee_options: list[Person] = field(default_factory=list)  # candidatos para trocar
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> Draft:
@@ -47,6 +51,8 @@ class Draft:
             ],
             model=data.get("modelo", ""),
             template=data.get("template"),
+            assignee=Person(who["login"], who.get("name") or "") if (who := data.get("responsavel")) else None,
+            assignee_options=[Person(c["login"], c.get("name") or "") for c in data.get("candidatos_responsavel") or []],
         )
 
 

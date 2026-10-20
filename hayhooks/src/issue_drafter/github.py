@@ -10,8 +10,21 @@ from typing import Any
 
 import httpx
 
+from .people import Person
+
 LABELS_TTL = 300  # segundos
 TEMPLATES_TTL = 600
+PEOPLE_TTL = 600
+
+_ASSIGNABLE = """
+query($owner: String!, $repo: String!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    assignableUsers(first: 100, after: $after) {
+      nodes { login name }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
 
 
 @dataclass
@@ -62,17 +75,44 @@ class GitHubReader:
         )
         self._labels: dict[str, tuple[float, list[str]]] = {}
         self._templates: dict[str, tuple[float, list[IssueTemplate]]] = {}
+        self._people: dict[str, tuple[float, list[Person]]] = {}
 
-    def _get(self, url: str, **kwargs: Any) -> httpx.Response:
-        """GET com uma nova tentativa: o GitHub às vezes derruba a conexão sem responder."""
+    def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Requisição com novas tentativas: o GitHub às vezes derruba a conexão sem responder."""
         for attempt in (1, 2, 3):
             try:
-                return self._http.get(url, **kwargs)
+                return self._http.request(method, url, **kwargs)
             except httpx.TransportError:
                 if attempt == 3:
                     raise
                 time.sleep(0.5 * attempt)
         raise AssertionError("inalcançável")
+
+    def _get(self, url: str, **kwargs: Any) -> httpx.Response:
+        return self._send("GET", url, **kwargs)
+
+    def assignable_people(self, repo: str) -> list[Person]:
+        """Quem pode ser responsável por issues no repositório (login e nome do perfil)."""
+        cached = self._people.get(repo)
+        if cached and time.monotonic() - cached[0] < PEOPLE_TTL:
+            return cached[1]
+        people: list[Person] = []
+        after = None
+        while True:
+            resp = self._send("POST", "/graphql", json={
+                "query": _ASSIGNABLE, "variables": {"owner": self.org, "repo": repo, "after": after},
+            })
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("errors"):
+                raise httpx.HTTPError(data["errors"][0].get("message", "erro no GraphQL"))
+            page = data["data"]["repository"]["assignableUsers"]
+            people += [Person(n["login"], n.get("name") or "") for n in page["nodes"]]
+            if not page["pageInfo"]["hasNextPage"]:
+                break
+            after = page["pageInfo"]["endCursor"]
+        self._people[repo] = (time.monotonic(), people)
+        return people
 
     def labels(self, repo: str) -> list[str]:
         cached = self._labels.get(repo)

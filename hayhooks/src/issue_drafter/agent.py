@@ -28,6 +28,7 @@ from jinja2 import Template
 
 from .config import DrafterSettings
 from .github import GitHubReader, IssueTemplate
+from .people import Person, find_people
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +97,32 @@ class IssueDrafter:
         )
 
     @staticmethod
+    def _person_tool(people: list[Person]) -> Tool:
+        def buscar_pessoa(nome: str) -> dict[str, Any]:
+            matches = find_people(nome, people)
+            log.info("buscar_pessoa(%r) -> %s", nome, [(m.person.login, m.score) for m in matches])
+            found = [{"login": m.person.login, "name": m.person.name, "score": m.score} for m in matches]
+            if not found:
+                text = f"Ninguém parecido com {nome!r} entre quem pode ser responsável neste repositório."
+            else:
+                text = "\n".join(f"{m.person.login} — {m.person.name or 'sem nome no perfil'} (semelhança {m.score}%)"
+                                 for m in matches)
+            return {"candidatos": found, "texto": text}
+
+        return Tool(
+            name="buscar_pessoa",
+            description="Procura, por semelhança de nome, quem pode ser responsável pela issue no repositório.",
+            parameters={
+                "type": "object",
+                "properties": {"nome": {"type": "string", "description": "Nome como aparece no relato"}},
+                "required": ["nome"],
+            },
+            function=buscar_pessoa,
+            outputs_to_string={"source": "texto"},
+            outputs_to_state={"candidatos_responsavel": {"source": "candidatos"}},
+        )
+
+    @staticmethod
     def _template_tool(templates: list[IssueTemplate]) -> Tool:
         by_name = {t.name: t for t in templates}
 
@@ -120,9 +147,17 @@ class IssueDrafter:
     @staticmethod
     def _propose_tool(labels: list[str], template_names: list[str]) -> Tool:
         def propor_issue(
-            title: str, body: str, labels: list[str], duplicada_de: str | None = None, template: str | None = None
+            title: str,
+            body: str,
+            labels: list[str],
+            duplicada_de: str | None = None,
+            template: str | None = None,
+            responsavel: str | None = None,
         ) -> dict[str, Any]:
-            return {"title": title, "body": body, "labels": labels, "duplicada_de": duplicada_de, "template": template}
+            return {
+                "title": title, "body": body, "labels": labels, "duplicada_de": duplicada_de,
+                "template": template, "responsavel": responsavel,
+            }
 
         return Tool(
             name="propor_issue",
@@ -141,6 +176,10 @@ class IssueDrafter:
                     "duplicada_de": {
                         "type": "string",
                         "description": "repositorio#numero da issue aberta duplicada, se houver",
+                    },
+                    "responsavel": {
+                        "type": "string",
+                        "description": "login escolhido com buscar_pessoa, só se o relato pedir um responsável",
                     },
                     **(
                         {"template": {"type": "string", "enum": template_names, "description": "Modelo usado"}}
@@ -181,11 +220,14 @@ class IssueDrafter:
 
         labels = self.allowed_labels(repo)
         templates = self.issue_templates(repo)
+        people = self.assignable_people(repo)
         system_prompt = self._prompt.render(
             org=self.settings.github_org, repo=repo, labels=labels, default_labels=self.settings.default_labels,
-            templates=templates,
+            templates=templates, people=bool(people),
         )
         tools = [self._search_tool()]
+        if people:
+            tools.append(self._person_tool(people))
         if templates:
             tools.append(self._template_tool(templates))
         tools.append(self._propose_tool(labels, [t.name for t in templates]))
@@ -195,7 +237,11 @@ class IssueDrafter:
             system_prompt=system_prompt,
             exit_conditions=["propor_issue"],
             max_agent_steps=self.settings.max_agent_steps,
-            state_schema={"similares": {"type": list[dict]}, "rascunho": {"type": dict}},
+            state_schema={
+                "similares": {"type": list[dict]},
+                "candidatos_responsavel": {"type": list[dict]},
+                "rascunho": {"type": dict},
+            },
         )
         agent.warm_up()
         result = agent.run(messages=[ChatMessage.from_user(texto)])
@@ -205,7 +251,29 @@ class IssueDrafter:
             last = result.get("last_message")
             log.warning("O modelo terminou sem chamar propor_issue: %s", last.text if last else None)
             raise DraftError("O modelo não chegou a propor a issue.")
-        return self._clean(rascunho, result.get("similares") or [], labels, templates)
+        draft = self._clean(rascunho, result.get("similares") or [], labels, templates)
+        return draft | self._assignee(rascunho.get("responsavel"), result.get("candidatos_responsavel") or [])
+
+    def assignable_people(self, repo: str | None) -> list[Person]:
+        if not repo:
+            return []
+        try:
+            return self.github.assignable_people(repo)
+        except httpx.HTTPError as exc:
+            log.warning("Não consegui listar quem pode ser responsável em %s: %s", repo, exc)
+            return []
+
+    @staticmethod
+    def _assignee(chosen: Any, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        """O responsável só vale se saiu de buscar_pessoa: o modelo não pode inventar alguém."""
+        unique: dict[str, dict[str, Any]] = {}
+        for c in sorted(candidates, key=lambda c: -c["score"]):
+            unique.setdefault(c["login"].lower(), c)
+        picked = unique.get(str(chosen or "").strip().lstrip("@").lower())
+        return {
+            "responsavel": {"login": picked["login"], "name": picked["name"]} if picked else None,
+            "candidatos_responsavel": list(unique.values())[:3],
+        }
 
     def _clean(
         self,

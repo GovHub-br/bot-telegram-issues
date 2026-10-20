@@ -7,6 +7,7 @@ Formato do callback_data (limite de 64 bytes do Telegram):
     c:<repo>:<n>         comentar
     n:...                passos da criação de issue (/nova)
         n:r:<repo> escolhe o repositório · n:rp:<page> página da lista de repositórios
+        n:a:<login> responsável · n:a:? procurar pelo nome · n:a:- sem responsável · n:a:< voltar
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from telegram import InlineKeyboardMarkup as Markup
 
 from .formatting import state_icon, truncate
 from .github import Issue, Repo
+from .people import Person
 
 STATE_BUTTONS = (("open", "🟢 Abertas"), ("closed", "🟣 Fechadas"), ("all", "📚 Todas"))
 REPOS_PER_PAGE = 10
@@ -119,6 +121,19 @@ def draft_confirm() -> Markup:
                 Btn("🏷️ Labels", callback_data="n:e:labels"),
                 Btn("📦 Repositório", callback_data="n:e:repo"),
             ],
+            [Btn("👤 Responsável", callback_data="n:e:who")],
             [Btn("❌ Cancelar", callback_data="n:cancel")],
         ]
     )
+
+
+def assignee_picker(options: list[Person], current: Person | None) -> Markup:
+    rows = [
+        [Btn(("✅ " if current and p.login == current.login else "👤 ") + truncate(p.label, 40),
+             callback_data=f"n:a:{p.login}")]
+        for p in options
+        if fits(f"n:a:{p.login}")
+    ]
+    rows.append([Btn("🔎 Procurar pelo nome", callback_data="n:a:?")])
+    rows.append([Btn("🚫 Sem responsável", callback_data="n:a:-"), Btn("↩️ Voltar", callback_data="n:a:<")])
+    return Markup(rows)
